@@ -11,12 +11,11 @@ static void output_txt_init(struct output_data_t *out)
 {
 	int i;
 	for(i=0;i<out->columns;++i) {
-		if (strlen(out->labels[i])>8)
-			printf("[%i]: %s\n",i,out->labels[i]);
+		printf("[%i]: %s\n",i,out->labels[i]);
 	}
 	printf("\n");
 	for(i=0;i<out->columns;++i) {
-		if (strlen(out->labels[i])>8)
+		if (strlen(out->labels[i])>=8)
 			printf("[%*i] ",COLWIDTH-3,i);
 		else
 			printf("%*s ",COLWIDTH-1,out->labels[i]);
