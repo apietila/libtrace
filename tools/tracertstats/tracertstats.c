@@ -69,6 +69,9 @@ int merge_inputs = 0;
 
 int report_directions = 0;
 
+int report_rel_time = 0;
+
+// stats per filter / report period
 struct filter_t {
     char *expr;
     struct libtrace_filter_t *filter;
@@ -81,26 +84,43 @@ struct filter_t {
 } *filters = NULL;
 int filter_count=0;
 
-uint64_t packet_count=UINT64_MAX;
-double packet_interval=UINT32_MAX;
+// totals (since start and period)
+struct {
+    uint64_t count;
+    uint64_t bytes;
+    uint64_t count_in;
+    uint64_t bytes_in;
+    uint64_t count_out;
+    uint64_t bytes_out;
+} totals;
 
+// packets per report (define this or interval)
+uint64_t packet_count=UINT64_MAX;
+// report interval (in seconds)
+double packet_interval=UINT32_MAX;
+// number of report periods (default infinite)
+uint64_t report_periods=UINT64_MAX;
+uint64_t reported=0;
 
 struct output_data_t *output = NULL;
 
-static void report_results(double ts,uint64_t count,uint64_t bytes,uint64_t count_in,uint64_t bytes_in,uint64_t count_out,uint64_t bytes_out)
+static void report_results(double ts)
 {
     int i=0;
     int cols = 2;
     output_set_data_time(output,0,ts);
-    output_set_data_int(output,1,count);
-    output_set_data_int(output,2,bytes);
+    output_set_data_int(output,1,totals.count);
+    output_set_data_int(output,2,totals.bytes);
+    totals.count=totals.bytes=0;
 
     if (report_directions) {
-        output_set_data_int(output,3,count_in);
-        output_set_data_int(output,4,bytes_in);
-        output_set_data_int(output,5,count_out);
-        output_set_data_int(output,6,bytes_out);
+        output_set_data_int(output,3,totals.count_in);
+        output_set_data_int(output,4,totals.bytes_in);
+        output_set_data_int(output,5,totals.count_out);
+        output_set_data_int(output,6,totals.bytes_out);
         cols = 6;
+	totals.count_in=totals.bytes_in=0;
+	totals.count_out=totals.bytes_out=0;
     }
 
     for(i=0;i<filter_count;++i) {
@@ -118,6 +138,7 @@ static void report_results(double ts,uint64_t count,uint64_t bytes,uint64_t coun
         }
     }
     output_flush_row(output);
+    ++reported;
 }
 
 static void create_output(char *title) {
@@ -166,14 +187,10 @@ static void run_trace(char *uri)
     struct libtrace_packet_t *packet = trace_create_packet();
     int dir;
     int i;
-    uint64_t count = 0;
-    uint64_t bytes = 0;
-    uint64_t count_in = 0;
-    uint64_t bytes_in = 0;
-    uint64_t count_out = 0;
-    uint64_t bytes_out = 0;
     double last_ts = 0;
     double ts = 0;
+
+    int report_in_time = (packet_interval != UINT32_MAX); 
 
     if (!merge_inputs) 
         create_output(uri);
@@ -214,19 +231,27 @@ static void run_trace(char *uri)
         dir = trace_get_direction(packet);
 
         if (last_ts == 0) {
-            last_ts = ts+packet_interval; // first report time
+	  last_ts = ts;
         }
 
-        while (packet_interval != UINT64_MAX && last_ts<ts) {
-            report_results(last_ts,count,bytes,count_in,bytes_in,count_out,bytes_out);
-            count=0;
-            bytes=0;
-            count_in=0;
-            bytes_in=0;
-            count_out=0;
-            bytes_out=0;
-            last_ts+=packet_interval;
+	// this will fill in all missed periods (because there
+	// was no traffic)
+        while (report_in_time && last_ts+packet_interval<ts) {
+	  last_ts+=packet_interval;
+	  if (report_rel_time) {
+            report_results(packet_interval);
+	  } else {
+            report_results(last_ts);
+	  }
+	  if (report_periods != UINT64_MAX && 
+	      reported >= report_periods) {
+	    break;
+	  }
         }
+	if (report_periods != UINT64_MAX && 
+	    reported >= report_periods) {
+	  break;
+	}
 
         for(i=0;i<filter_count;++i) {
             if(trace_apply_filter(filters[i].filter,packet)) {
@@ -245,30 +270,34 @@ static void run_trace(char *uri)
             }
         }
 
-        ++count;
-        bytes+=trace_get_wire_length(packet);
-
+	// total stats
+        totals.count++;
+        totals.bytes+=trace_get_wire_length(packet);
         if (report_directions) {
             if (dir == TRACE_DIR_OUTGOING) {
-                ++count_out;
-                bytes_out+=trace_get_wire_length(packet);
+	      totals.count_out++;
+	      totals.bytes_out+=trace_get_wire_length(packet);
             } else if (dir == TRACE_DIR_INCOMING) {
-                ++count_in;
-                bytes_in+=trace_get_wire_length(packet);
+	      totals.count_in++;
+	      totals.bytes_in+=trace_get_wire_length(packet);
             }
         }
 
-        if (count >= packet_count) {
-            report_results(ts,count,bytes,count_in,bytes_in,count_out,bytes_out);
-            count=0;
-            bytes=0;
-            count_in=0;
-            bytes_in=0;
-            count_out=0;
-            bytes_out=0;
+        if (!report_in_time && packet_count != UINT64_MAX && 
+	    totals.count > 0 && 
+	    totals.count%packet_count == 0) {
+	  if (report_rel_time) {
+            report_results(ts-last_ts);
+	  } else {
+            report_results(ts);
+	  }
+	  last_ts = ts;
+	  if (report_periods != UINT64_MAX && 
+	      reported >= report_periods) {
+	    break;
+	  }
         }
     }
-    report_results(ts,count,bytes,count_in,bytes_in,count_out,bytes_out);
 
     if (trace_is_err(trace))
         trace_perror(trace,"%s",uri);
@@ -287,13 +316,15 @@ static void usage(char *argv0)
 {
     fprintf(stderr,"Usage:\n"
     "%s flags libtraceuri [libtraceuri...]\n"
-    "-i --interval=seconds  Duration of reporting interval in seconds\n"
-    "-d --direction     Report packets and bytes per direction (up/down)\n"
-    "-c --count=packets Exit after count packets received\n"
+    "-i --interval=seconds  Duration of reporting interval in seconds (default 10s)\n"
+    "-c --count=packets     Duration of reporting interval in packets (can't be defined together with -i)\n"
+    "-e --exit=periods      Exit after number of report periods (or never if missing)\n"
+    "-d --direction         Report packets and bytes per direction (up/down)\n"
+    "-r --relative          Report relative timestamps (useful for count based reporting)\n"
     "-o --output-format=txt|csv|html|png Reporting output format\n"
-    "-f --filter=bpf    Apply BPF filter. Can be specified multiple times\n"
-    "-m --merge-inputs  Do not create separate outputs for each input trace\n"
-    "-H --libtrace-help Print libtrace runtime documentation\n"
+    "-f --filter=bpf        Apply BPF filter. Can be specified multiple times\n"
+    "-m --merge-inputs      Do not create separate outputs for each input trace\n"
+    "-H --libtrace-help     Print libtrace runtime documentation\n"
     ,argv0);
 }
 
@@ -304,17 +335,19 @@ int main(int argc, char *argv[]) {
     while(1) {
         int option_index;
         struct option long_options[] = {
-            { "filter",     1, 0, 'f' },
-            { "interval",       1, 0, 'i' },
-            { "direction",      0, 0, 'd' },
-            { "count",      1, 0, 'c' },
-            { "output-format",  1, 0, 'o' },
-            { "libtrace-help",  0, 0, 'H' },
-            { "merge-inputs",   0, 0, 'm' },
-            { NULL,         0, 0, 0   },
+	  { "filter",         1, 0, 'f' },
+	  { "interval",       1, 0, 'i' },
+	  { "count",          1, 0, 'c' },
+	  { "exit",           1, 0, 'e' },
+	  { "direction",      0, 0, 'd' },
+	  { "relative",       0, 0, 'r' },
+	  { "output-format",  1, 0, 'o' },
+	  { "libtrace-help",  0, 0, 'H' },
+	  { "merge-inputs",   0, 0, 'm' },
+	  { NULL,             0, 0, 0   },
         };
 
-        int c=getopt_long(argc, argv, "c:f:i:o:Hmd",
+        int c=getopt_long(argc, argv, "c:f:i:e:o:Hmdr",
                 long_options, &option_index);
 
         if (c==-1)
@@ -335,12 +368,20 @@ int main(int argc, char *argv[]) {
                 break;
             case 'i':
                 packet_interval=atof(optarg);
+		packet_count=UINT64_MAX; // make sure only one is defined
+                break;
+            case 'c':
+                packet_count=atoi(optarg);
+		packet_interval=UINT32_MAX; // make sure only one is defined
+                break;
+            case 'e':
+                report_periods=atoi(optarg);
                 break;
             case 'd':
                 report_directions = 1;
                 break;
-            case 'c':
-                packet_count=atoi(optarg);
+            case 'r':
+                report_rel_time = 1;
                 break;
             case 'o':
                 if (output_format) free(output_format);
@@ -360,8 +401,9 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // default report period is every 10s
     if (packet_count == UINT64_MAX && packet_interval == UINT32_MAX) {
-        packet_interval = 300; /* every 5 minutes */
+        packet_interval = 10; /* every 10 seconds */
     }
 
     if (optind >= argc)
@@ -372,8 +414,6 @@ int main(int argc, char *argv[]) {
     else
         fprintf(stderr,"output format: '%s'\n", DEFAULT_OUTPUT_FMT);
     
-    
-
     if (merge_inputs) {
         /* If we're merging the inputs, we only want to create all
          * the column headers etc. once rather than doing them once
@@ -385,7 +425,6 @@ int main(int argc, char *argv[]) {
         if (output == NULL) {
             return 0;
         }
-
     }
         
     for(i=optind;i<argc;++i) {
@@ -398,6 +437,5 @@ int main(int argc, char *argv[]) {
         output_destroy(output);
     }
 
-
-        return 0;
+    return 0;
 }
