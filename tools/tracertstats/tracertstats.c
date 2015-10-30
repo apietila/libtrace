@@ -189,6 +189,7 @@ static void run_trace(char *uri)
     int i;
     double last_ts = 0;
     double ts = 0;
+    uint64_t f;
 
     int report_in_time = (packet_interval != UINT32_MAX); 
 
@@ -302,7 +303,19 @@ static void run_trace(char *uri)
     if (trace_is_err(trace))
         trace_perror(trace,"%s",uri);
 
-    fprintf(stderr,"done!\n");
+    // some stats
+    f=trace_get_received_packets(trace);
+    if (f!=UINT64_MAX)
+      fprintf(stderr,"%" PRIu64 " packets on input\n",f);
+    f=trace_get_filtered_packets(trace);
+    if (f!=UINT64_MAX)
+      fprintf(stderr,"%" PRIu64 " packets filtered\n",f);
+    f=trace_get_dropped_packets(trace);
+    if (f!=UINT64_MAX)
+      fprintf(stderr,"%" PRIu64 " packets dropped\n",f);
+    f=trace_get_accepted_packets(trace);
+    if (f!=UINT64_MAX)
+      fprintf(stderr,"%" PRIu64 " packets accepted\n",f);
 
     trace_destroy(trace);
 
