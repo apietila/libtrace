@@ -237,22 +237,16 @@ static void run_trace(char *uri)
 
 	// this will fill in all missed periods (because there
 	// was no traffic)
-        while (report_in_time && last_ts+packet_interval<ts) {
+        while (report_in_time && 
+	       last_ts+packet_interval<ts &&
+	       (report_periods == UINT64_MAX || reported < report_periods)) {
 	  last_ts+=packet_interval;
 	  if (report_rel_time) {
             report_results(packet_interval);
 	  } else {
             report_results(last_ts);
 	  }
-	  if (report_periods != UINT64_MAX && 
-	      reported >= report_periods) {
-	    break;
-	  }
         }
-	if (report_periods != UINT64_MAX && 
-	    reported >= report_periods) {
-	  break;
-	}
 
         for(i=0;i<filter_count;++i) {
             if(trace_apply_filter(filters[i].filter,packet)) {
@@ -284,20 +278,31 @@ static void run_trace(char *uri)
             }
         }
 
-        if (!report_in_time && packet_count != UINT64_MAX && 
+        if (!report_in_time &&  
 	    totals.count > 0 && 
-	    totals.count%packet_count == 0) {
+	    totals.count%packet_count == 0 &&
+	    (report_periods == UINT64_MAX || reported < report_periods)) {
 	  if (report_rel_time) {
             report_results(ts-last_ts);
 	  } else {
             report_results(ts);
 	  }
 	  last_ts = ts;
-	  if (report_periods != UINT64_MAX && 
-	      reported >= report_periods) {
-	    break;
-	  }
         }
+
+       if (report_periods != UINT64_MAX && reported >= report_periods) {
+	 break;
+       }
+    } // end pkt loop
+
+    // report any pending pkts
+    if (totals.count > 0 &&
+	(report_periods == UINT64_MAX || reported < report_periods)) {
+      if (report_rel_time) {
+	report_results(ts-last_ts);
+      } else {
+	report_results(ts);
+      }
     }
 
     if (trace_is_err(trace))
@@ -414,11 +419,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // default report period is every 10s
-    if (packet_count == UINT64_MAX && packet_interval == UINT32_MAX) {
-        packet_interval = 10; /* every 10 seconds */
-    }
-
     if (optind >= argc)
         return 0;
 
@@ -426,7 +426,12 @@ int main(int argc, char *argv[]) {
         fprintf(stderr,"output format: '%s'\n",output_format);
     else
         fprintf(stderr,"output format: '%s'\n", DEFAULT_OUTPUT_FMT);
-    
+
+    // set some default reporting period if nothing set
+    if (packet_interval == UINT32_MAX && packet_count == UINT64_MAX) {
+      packet_interval = 10;
+    }
+
     if (merge_inputs) {
         /* If we're merging the inputs, we only want to create all
          * the column headers etc. once rather than doing them once
